@@ -54,13 +54,73 @@ Before starting a new feature or meaningful documentation change:
 ```bash
 git checkout main
 git pull --ff-only
-git checkout -b <type>/<short-description>
+git checkout -b feat-feature_name
 ```
 
-Keep each feature on its own normal branch from the updated `main` checkout.
-Commit focused changes, verify them, and push the branch when asked. If an old
-local worktree is present from earlier work, verify it is clean and no longer
-needed before removing it.
+Keep each feature or patch on its own normal branch from the updated `main`
+checkout. Commit focused changes, verify them, and push the branch when asked.
+If an old local worktree is present from earlier work, verify it is clean and no
+longer needed before removing it.
+
+### Branch Naming
+
+Use these branch name prefixes exactly:
+
+- `feat-<feature_name>` for a new user-visible feature or major internal
+  capability.
+- `fix-<bug_name>` for a bug fix.
+- `patch-<change_name>` for small docs, config, cleanup, refactor, or
+  maintenance changes.
+
+Branch name rules:
+
+- Use lowercase ASCII.
+- Use underscores between words after the prefix.
+- Do not use spaces, slashes, or vague names like `update`, `changes`, or
+  `work`.
+- Keep names short and searchable, usually 2 to 5 words after the prefix.
+- Do not commit directly on `main` unless the human maintainer explicitly asks
+  for it in the current task.
+- If a branch was created with the wrong name and has not been pushed, rename it
+  before continuing.
+
+Examples:
+
+```text
+feat-worker_heartbeat
+feat-delayed_job_scheduler
+fix-lease_recovery_race
+fix-api_validation_error
+patch-branch_naming_rules
+patch-local_dev_docs
+```
+
+### Commit and Pull Request Hygiene
+
+- Keep commits focused on one idea.
+- Use clear commit messages such as `feat: add worker heartbeat`, `fix: recover
+  expired leases`, `patch: document branch naming`, or `docs: explain retries`.
+- Do not mix unrelated refactors with feature behavior.
+- Before opening or updating a pull request, make sure the branch is based on the
+  latest `main` unless doing so would risk overwriting someone else's work.
+- Pull request notes should explain what changed, why it changed, how it was
+  verified, and any known follow-up work.
+- Never hide failing commands. If verification fails, record the exact command
+  and the important failure output.
+
+### Developer Experience Hygiene
+
+- When a command becomes part of regular development, document it in
+  `dev-docs/` or add a small script/Make target in a follow-up change.
+- Keep local setup repeatable. New environment variables need documentation and
+  safe example values.
+- Keep examples practical. API examples should be runnable with local defaults
+  whenever possible.
+- Prefer boring, predictable tooling over clever local automation.
+- Do not introduce generated files, editor metadata, or machine-local paths into
+  commits.
+- If a task changes how developers build, test, run, migrate, or debug ByteMQ,
+  update the developer docs in the same branch.
 
 ## Go Coding Policy
 
@@ -261,6 +321,10 @@ AI agents must follow these rules:
     report what passed or what could not be run.
 11. Use the main checkout plus a normal feature branch for new work. Do not
     create `.worktrees/` unless the human maintainer explicitly requests it.
+12. Follow the branch naming policy: `feat-<feature_name>`, `fix-<bug_name>`, or
+    `patch-<change_name>`.
+13. Keep developer workflow changes documented so the next contributor can start
+    without guessing hidden local steps.
 
 ## Definition of Done
 
