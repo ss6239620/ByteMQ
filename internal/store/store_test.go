@@ -85,3 +85,70 @@ func TestEnqueueJobRequestValidateDoesNotMutateRunAfter(t *testing.T) {
 		t.Fatalf("Validate should not mutate RunAfter")
 	}
 }
+
+func TestLeaseJobRequestValidate(t *testing.T) {
+	valid := LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected valid lease request, got %v", err)
+	}
+
+	cases := []LeaseJobRequest{
+		{WorkerID: "", LeaseID: "lease-1", LeaseDuration: 30 * time.Second},
+		{WorkerID: "worker-1", LeaseID: "", LeaseDuration: 30 * time.Second},
+		{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 0},
+	}
+	for _, req := range cases {
+		if err := req.Validate(); err != ErrInvalidLease {
+			t.Fatalf("expected ErrInvalidLease for %+v, got %v", req, err)
+		}
+	}
+}
+
+func TestOwnershipRequestValidate(t *testing.T) {
+	validStart := StartJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: "lease-1"}
+	if err := validStart.Validate(); err != nil {
+		t.Fatalf("expected valid start request, got %v", err)
+	}
+	validComplete := CompleteJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: "lease-1"}
+	if err := validComplete.Validate(); err != nil {
+		t.Fatalf("expected valid complete request, got %v", err)
+	}
+	validFail := FailJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: "lease-1", Error: "boom"}
+	if err := validFail.Validate(); err != nil {
+		t.Fatalf("expected valid fail request, got %v", err)
+	}
+
+	invalidStart := StartJobRequest{JobID: "", WorkerID: "worker-1", LeaseID: "lease-1"}
+	if err := invalidStart.Validate(); err != ErrInvalidLease {
+		t.Fatalf("expected ErrInvalidLease for invalid start, got %v", err)
+	}
+	invalidComplete := CompleteJobRequest{JobID: "job-1", WorkerID: "", LeaseID: "lease-1"}
+	if err := invalidComplete.Validate(); err != ErrInvalidLease {
+		t.Fatalf("expected ErrInvalidLease for invalid complete, got %v", err)
+	}
+	invalidFail := FailJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: ""}
+	if err := invalidFail.Validate(); err != ErrInvalidLease {
+		t.Fatalf("expected ErrInvalidLease for invalid fail, got %v", err)
+	}
+}
+
+func TestHeartbeatJobRequestValidate(t *testing.T) {
+	valid := HeartbeatJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected valid heartbeat, got %v", err)
+	}
+
+	invalid := HeartbeatJobRequest{JobID: "job-1", WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 0}
+	if err := invalid.Validate(); err != ErrInvalidLease {
+		t.Fatalf("expected ErrInvalidLease, got %v", err)
+	}
+}
+
+func TestRecoverExpiredLeasesRequestValidate(t *testing.T) {
+	if err := (RecoverExpiredLeasesRequest{Limit: 10}).Validate(); err != nil {
+		t.Fatalf("expected valid recovery request, got %v", err)
+	}
+	if err := (RecoverExpiredLeasesRequest{Limit: 0}).Validate(); err != ErrInvalidLease {
+		t.Fatalf("expected ErrInvalidLease, got %v", err)
+	}
+}
