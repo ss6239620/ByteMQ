@@ -154,3 +154,113 @@ func TestStoreEnqueueJobDoesNotRecordSecondEventForIdempotentDuplicate(t *testin
 		t.Fatalf("expected duplicate idempotent enqueue to preserve one event, got %d", len(events))
 	}
 }
+
+func TestStoreLeaseNextJobAssignsActiveLease(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	if _, err := storeClient.EnqueueJob(ctx, validStoreRequest("job_lease_1")); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	job, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{
+		WorkerID:      "worker-1",
+		LeaseID:       "lease-1",
+		LeaseDuration: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+
+	if job.State != domain.JobStateLeased {
+		t.Fatalf("expected leased state, got %s", job.State)
+	}
+	if job.LeasedBy != "worker-1" || job.LeaseID != "lease-1" {
+		t.Fatalf("unexpected lease owner: worker=%q lease=%q", job.LeasedBy, job.LeaseID)
+	}
+	if job.LeaseExpiresAt.IsZero() {
+		t.Fatal("expected lease expiry")
+	}
+}
+
+func TestStoreLeaseNextJobReturnsNoJobAvailable(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+
+	_, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{
+		WorkerID:      "worker-1",
+		LeaseID:       "lease-1",
+		LeaseDuration: 30 * time.Second,
+	})
+	if err != store.ErrNoJobAvailable {
+		t.Fatalf("expected ErrNoJobAvailable, got %v", err)
+	}
+}
+
+func TestStoreStartJobRequiresActiveLeaseOwner(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	if _, err := storeClient.EnqueueJob(ctx, validStoreRequest("job_start_1")); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+
+	_, err = storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-2", LeaseID: "lease-1"})
+	if err != store.ErrLeaseNotOwned {
+		t.Fatalf("expected ErrLeaseNotOwned for wrong worker, got %v", err)
+	}
+
+	started, err := storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"})
+	if err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+	if started.State != domain.JobStateRunning {
+		t.Fatalf("expected running state, got %s", started.State)
+	}
+	if started.Attempt != 1 {
+		t.Fatalf("expected attempt 1, got %d", started.Attempt)
+	}
+}
+
+func TestStoreHeartbeatExtendsActiveLease(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	if _, err := storeClient.EnqueueJob(ctx, validStoreRequest("job_heartbeat_1")); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+
+	heartbeat, err := storeClient.HeartbeatJob(ctx, store.HeartbeatJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("heartbeat job: %v", err)
+	}
+	if !heartbeat.LeaseExpiresAt.After(leased.LeaseExpiresAt) {
+		t.Fatalf("expected heartbeat to extend lease from %s to after it, got %s", leased.LeaseExpiresAt, heartbeat.LeaseExpiresAt)
+	}
+}
+
+func TestStoreCompleteJobClearsLeaseAndMarksCompleted(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	if _, err := storeClient.EnqueueJob(ctx, validStoreRequest("job_complete_1")); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+	if _, err := storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+
+	completed, err := storeClient.CompleteJob(ctx, store.CompleteJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"})
+	if err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+	if completed.State != domain.JobStateCompleted {
+		t.Fatalf("expected completed state, got %s", completed.State)
+	}
+	if completed.LeasedBy != "" || completed.LeaseID != "" || !completed.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected completed job lease fields to be cleared")
+	}
+}
