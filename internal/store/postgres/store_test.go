@@ -264,3 +264,135 @@ func TestStoreCompleteJobClearsLeaseAndMarksCompleted(t *testing.T) {
 		t.Fatalf("expected completed job lease fields to be cleared")
 	}
 }
+
+func TestStoreFailJobSchedulesRetryWhenAttemptsRemain(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	req := validStoreRequest("job_fail_retry_1")
+	req.RunAfter = time.Now().UTC()
+	if _, err := storeClient.EnqueueJob(ctx, req); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+	if _, err := storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+
+	failed, err := storeClient.FailJob(ctx, store.FailJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1", Error: "boom"})
+	if err != nil {
+		t.Fatalf("fail job: %v", err)
+	}
+
+	if failed.State != domain.JobStateRetryScheduled {
+		t.Fatalf("expected retry_scheduled state, got %s", failed.State)
+	}
+	if failed.LastError != "boom" {
+		t.Fatalf("expected last error boom, got %q", failed.LastError)
+	}
+	if !failed.RunAfter.After(req.RunAfter) {
+		t.Fatalf("expected retry run_after after original run_after")
+	}
+	if failed.LeasedBy != "" || failed.LeaseID != "" || !failed.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected failed retry job lease fields to be cleared")
+	}
+}
+
+func TestStoreFailJobDeadLettersWhenAttemptsExhausted(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	req := validStoreRequest("job_fail_dead_1")
+	req.RetryPolicy.MaxAttempts = 1
+	req.RunAfter = time.Now().UTC()
+	if _, err := storeClient.EnqueueJob(ctx, req); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+	if _, err := storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+
+	failed, err := storeClient.FailJob(ctx, store.FailJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1", Error: "boom"})
+	if err != nil {
+		t.Fatalf("fail job: %v", err)
+	}
+
+	if failed.State != domain.JobStateDeadLettered {
+		t.Fatalf("expected dead_lettered state, got %s", failed.State)
+	}
+	if failed.LastError != "boom" {
+		t.Fatalf("expected last error boom, got %q", failed.LastError)
+	}
+}
+
+func TestStoreRecoverExpiredLeasesRequeuesUnstartedLeasedJob(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	if _, err := storeClient.EnqueueJob(ctx, validStoreRequest("job_recover_leased_1")); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+	if _, err := storeClient.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, leased.ID); err != nil {
+		t.Fatalf("force lease expiry: %v", err)
+	}
+
+	recovered, err := storeClient.RecoverExpiredLeases(ctx, store.RecoverExpiredLeasesRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("recover expired leases: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered job, got %d", recovered)
+	}
+	got, err := storeClient.GetJob(ctx, leased.ID)
+	if err != nil {
+		t.Fatalf("get recovered job: %v", err)
+	}
+	if got.State != domain.JobStateQueued {
+		t.Fatalf("expected queued state, got %s", got.State)
+	}
+	if got.LeasedBy != "" || got.LeaseID != "" || !got.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected recovered job lease fields to be cleared")
+	}
+}
+
+func TestStoreRecoverExpiredLeasesSchedulesRetryForExpiredRunningJob(t *testing.T) {
+	storeClient, ctx := migratedStore(t)
+	req := validStoreRequest("job_recover_running_1")
+	req.RunAfter = time.Now().UTC()
+	if _, err := storeClient.EnqueueJob(ctx, req); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	leased, err := storeClient.LeaseNextJob(ctx, store.LeaseJobRequest{WorkerID: "worker-1", LeaseID: "lease-1", LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("lease job: %v", err)
+	}
+	if _, err := storeClient.StartJob(ctx, store.StartJobRequest{JobID: leased.ID, WorkerID: "worker-1", LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+	if _, err := storeClient.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, leased.ID); err != nil {
+		t.Fatalf("force lease expiry: %v", err)
+	}
+
+	recovered, err := storeClient.RecoverExpiredLeases(ctx, store.RecoverExpiredLeasesRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("recover expired leases: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered job, got %d", recovered)
+	}
+	got, err := storeClient.GetJob(ctx, leased.ID)
+	if err != nil {
+		t.Fatalf("get recovered job: %v", err)
+	}
+	if got.State != domain.JobStateRetryScheduled {
+		t.Fatalf("expected retry_scheduled state, got %s", got.State)
+	}
+	if got.LeasedBy != "" || got.LeaseID != "" || !got.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected recovered running job lease fields to be cleared")
+	}
+}

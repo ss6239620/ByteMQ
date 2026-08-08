@@ -333,22 +333,148 @@ func (s *Store) CompleteJob(ctx context.Context, req store.CompleteJobRequest) (
 	return job, nil
 }
 
+func (s *Store) FailJob(ctx context.Context, req store.FailJobRequest) (store.JobRecord, error) {
+	if err := req.Validate(); err != nil {
+		return store.JobRecord{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return store.JobRecord{}, fmt.Errorf("begin fail job: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	job, dbNow, err := lockedOwnedRunningJob(ctx, tx, req.JobID, req.WorkerID, req.LeaseID)
+	if err != nil {
+		return store.JobRecord{}, err
+	}
+
+	nextState, nextRunAfter := nextFailureState(job, dbNow)
+	updated, err := updateFailedJob(ctx, tx, job.ID, nextState, nextRunAfter, req.Error)
+	if err != nil {
+		return store.JobRecord{}, err
+	}
+	if err := finishAttemptWithError(ctx, tx, updated.ID, updated.Attempt, req.Error); err != nil {
+		return store.JobRecord{}, err
+	}
+	if err := insertJobEvent(ctx, tx, updated.ID, "job_failed", req.Error); err != nil {
+		return store.JobRecord{}, err
+	}
+	if nextState == domain.JobStateRetryScheduled {
+		if err := insertJobEvent(ctx, tx, updated.ID, "job_retry_scheduled", "job retry scheduled"); err != nil {
+			return store.JobRecord{}, err
+		}
+	} else {
+		if err := insertJobEvent(ctx, tx, updated.ID, "job_dead_lettered", "job dead lettered"); err != nil {
+			return store.JobRecord{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.JobRecord{}, fmt.Errorf("commit fail job: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *Store) RecoverExpiredLeases(ctx context.Context, req store.RecoverExpiredLeasesRequest) (int, error) {
+	if err := req.Validate(); err != nil {
+		return 0, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin recover expired leases: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var dbNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&dbNow); err != nil {
+		return 0, fmt.Errorf("read database time: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT
+			id, queue, type, payload, state, attempt,
+			max_attempts, backoff_type, initial_delay_ms, max_delay_ms,
+			run_after, COALESCE(idempotency_key, ''), COALESCE(last_error, ''),
+			COALESCE(leased_by, ''), COALESCE(lease_id, ''), lease_expires_at,
+			created_at, updated_at
+		FROM jobs
+		WHERE state IN ($1, $2)
+		AND lease_expires_at <= now()
+		ORDER BY lease_expires_at, id
+		LIMIT $3
+		FOR UPDATE SKIP LOCKED
+	`, domain.JobStateLeased, domain.JobStateRunning, req.Limit)
+	if err != nil {
+		return 0, fmt.Errorf("select expired leases: %w", err)
+	}
+	defer rows.Close()
+
+	var expired []store.JobRecord
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return 0, fmt.Errorf("scan expired lease: %w", err)
+		}
+		expired = append(expired, job)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate expired leases: %w", err)
+	}
+
+	for _, job := range expired {
+		if err := insertJobEvent(ctx, tx, job.ID, "lease_expired", "lease expired"); err != nil {
+			return 0, err
+		}
+		if job.State == domain.JobStateLeased {
+			if _, err := updateRecoveredJob(ctx, tx, job.ID, domain.JobStateQueued, dbNow, job.LastError); err != nil {
+				return 0, err
+			}
+			continue
+		}
+
+		const leaseExpiredError = "lease expired"
+		nextState, nextRunAfter := nextFailureState(job, dbNow)
+		updated, err := updateRecoveredJob(ctx, tx, job.ID, nextState, nextRunAfter, leaseExpiredError)
+		if err != nil {
+			return 0, err
+		}
+		if err := finishAttemptWithError(ctx, tx, updated.ID, updated.Attempt, leaseExpiredError); err != nil {
+			return 0, err
+		}
+		if nextState == domain.JobStateRetryScheduled {
+			if err := insertJobEvent(ctx, tx, updated.ID, "job_retry_scheduled", "job retry scheduled after lease expiry"); err != nil {
+				return 0, err
+			}
+		} else {
+			if err := insertJobEvent(ctx, tx, updated.ID, "job_dead_lettered", "job dead lettered after lease expiry"); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit recover expired leases: %w", err)
+	}
+	return len(expired), nil
+}
+
 type jobScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanJob(row jobScanner) (store.JobRecord, error) {
-	job, err := scanJobFields(row, nil)
+	job, err := scanJobFields(row, nil, nil)
 	return job, err
 }
 
 func scanJobWithInserted(row jobScanner) (store.JobRecord, bool, error) {
 	var inserted bool
-	job, err := scanJobFields(row, &inserted)
+	job, err := scanJobFields(row, &inserted, nil)
 	return job, inserted, err
 }
 
-func scanJobFields(row jobScanner, inserted *bool) (store.JobRecord, error) {
+func scanJobFields(row jobScanner, inserted *bool, dbNow *time.Time) (store.JobRecord, error) {
 	var job store.JobRecord
 	var payload []byte
 	var maxAttempts int
@@ -380,6 +506,9 @@ func scanJobFields(row jobScanner, inserted *bool) (store.JobRecord, error) {
 	if inserted != nil {
 		dest = append(dest, inserted)
 	}
+	if dbNow != nil {
+		dest = append(dest, dbNow)
+	}
 
 	err := row.Scan(dest...)
 	if err != nil {
@@ -410,6 +539,90 @@ func insertJobEvent(ctx context.Context, exec txExecutor, jobID string, eventTyp
 		VALUES ($1, $2, $3)
 	`, jobID, eventType, message); err != nil {
 		return fmt.Errorf("insert job event: %w", err)
+	}
+	return nil
+}
+
+func lockedOwnedRunningJob(ctx context.Context, tx pgx.Tx, jobID string, workerID string, leaseID string) (store.JobRecord, time.Time, error) {
+	row := tx.QueryRow(ctx, `
+		SELECT
+			id, queue, type, payload, state, attempt,
+			max_attempts, backoff_type, initial_delay_ms, max_delay_ms,
+			run_after, COALESCE(idempotency_key, ''), COALESCE(last_error, ''),
+			COALESCE(leased_by, ''), COALESCE(lease_id, ''), lease_expires_at,
+			created_at, updated_at,
+			now()
+		FROM jobs
+		WHERE id = $1
+		AND leased_by = $2
+		AND lease_id = $3
+		AND state = $4
+		AND lease_expires_at > now()
+		FOR UPDATE
+	`, jobID, workerID, leaseID, domain.JobStateRunning)
+
+	var dbNow time.Time
+	job, err := scanJobWithDatabaseTime(row, &dbNow)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.JobRecord{}, time.Time{}, store.ErrLeaseNotOwned
+	}
+	if err != nil {
+		return store.JobRecord{}, time.Time{}, fmt.Errorf("lock running job: %w", err)
+	}
+	return job, dbNow, nil
+}
+
+func scanJobWithDatabaseTime(row jobScanner, dbNow *time.Time) (store.JobRecord, error) {
+	job, err := scanJobFields(row, nil, dbNow)
+	return job, err
+}
+
+func nextFailureState(job store.JobRecord, dbNow time.Time) (domain.JobState, time.Time) {
+	if job.RetryPolicy.ShouldRetry(job.Attempt) {
+		return domain.JobStateRetryScheduled, dbNow.UTC().Add(job.RetryPolicy.DelayForAttempt(job.Attempt))
+	}
+	return domain.JobStateDeadLettered, job.RunAfter
+}
+
+func updateFailedJob(ctx context.Context, tx pgx.Tx, jobID string, state domain.JobState, runAfter time.Time, lastError string) (store.JobRecord, error) {
+	return updateRecoveredJob(ctx, tx, jobID, state, runAfter, lastError)
+}
+
+func updateRecoveredJob(ctx context.Context, tx pgx.Tx, jobID string, state domain.JobState, runAfter time.Time, lastError string) (store.JobRecord, error) {
+	row := tx.QueryRow(ctx, `
+		UPDATE jobs
+		SET state = $2,
+			run_after = $3,
+			leased_by = NULL,
+			lease_id = NULL,
+			lease_expires_at = NULL,
+			last_error = NULLIF($4, ''),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING
+			id, queue, type, payload, state, attempt,
+			max_attempts, backoff_type, initial_delay_ms, max_delay_ms,
+			run_after, COALESCE(idempotency_key, ''), COALESCE(last_error, ''),
+			COALESCE(leased_by, ''), COALESCE(lease_id, ''), lease_expires_at,
+			created_at, updated_at
+	`, jobID, state, runAfter, lastError)
+
+	job, err := scanJob(row)
+	if err != nil {
+		return store.JobRecord{}, fmt.Errorf("update recovered job: %w", err)
+	}
+	return job, nil
+}
+
+func finishAttemptWithError(ctx context.Context, tx pgx.Tx, jobID string, attempt int, message string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE job_attempts
+		SET finished_at = now(),
+			error = $3
+		WHERE job_id = $1
+		AND attempt = $2
+	`, jobID, attempt, message); err != nil {
+		return fmt.Errorf("finish job attempt with error: %w", err)
 	}
 	return nil
 }
