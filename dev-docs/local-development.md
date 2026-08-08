@@ -76,6 +76,22 @@ The project should provide a clear way to:
 Migrations should be committed files. Runtime code should not silently create or
 change tables unless an explicit dev-only command is chosen.
 
+## PostgreSQL Integration Tests
+
+Store integration tests use `BYTEMQ_TEST_DATABASE_URL`.
+
+Example:
+
+```bash
+BYTEMQ_TEST_DATABASE_URL=postgres://localhost/bytemq_test go test ./internal/store/postgres
+```
+
+When the variable is not set, PostgreSQL integration tests skip with a clear
+message. When it is set, tests create a temporary schema, set `search_path` to
+that schema, run migrations, and drop the schema during cleanup.
+
+Never point `BYTEMQ_TEST_DATABASE_URL` at a production or shared database.
+
 ## Manual Reliability Exercises
 
 The project should eventually include commands or scripts to test:
@@ -105,4 +121,3 @@ Local logs should answer:
 - Why did it dead-letter?
 
 Metrics can start as logs or a simple endpoint, then move to Prometheus later.
-
