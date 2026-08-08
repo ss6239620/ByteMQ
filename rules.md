@@ -43,6 +43,25 @@ The code must preserve these logical boundaries:
 Do not let HTTP handlers, CLI commands, or worker code directly mutate database
 tables. They must go through application services or store interfaces.
 
+## Git Workflow Policy
+
+Use the main repository checkout for normal development. Do not create a nested
+`.worktrees/` directory or separate local worktree for feature work unless the
+human maintainer explicitly asks for it in the current task.
+
+Before starting a new feature or meaningful documentation change:
+
+```bash
+git checkout main
+git pull --ff-only
+git checkout -b <type>/<short-description>
+```
+
+Keep each feature on its own normal branch from the updated `main` checkout.
+Commit focused changes, verify them, and push the branch when asked. If an old
+local worktree is present from earlier work, verify it is clean and no longer
+needed before removing it.
+
 ## Go Coding Policy
 
 Use idiomatic Go. Keep code direct, explicit, and easy to trace.
@@ -240,6 +259,8 @@ AI agents must follow these rules:
 9. Prefer making a concept easier to understand over making code look advanced.
 10. Before saying work is complete, run the relevant verification commands and
     report what passed or what could not be run.
+11. Use the main checkout plus a normal feature branch for new work. Do not
+    create `.worktrees/` unless the human maintainer explicitly requests it.
 
 ## Definition of Done
 
@@ -251,4 +272,3 @@ A change is done only when:
 - Formatting and verification commands pass.
 - Operational impact is understood: logs, metrics, retries, failure behavior,
   and recovery behavior are considered.
-
