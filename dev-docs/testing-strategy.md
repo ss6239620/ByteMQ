@@ -131,6 +131,21 @@ These tests should run against a disposable PostgreSQL database through
 `BYTEMQ_TEST_DATABASE_URL`. The default suite still verifies that integration
 tests compile and skip clearly when the variable is absent.
 
+## Runtime Unit Tests
+
+Runtime packages should stay database-independent:
+
+- `internal/app` tests use a fake `JobStore` to prove enqueue defaults, ID
+  generation, and lookup delegation.
+- `internal/api` tests use `httptest` and a fake app/store path to prove JSON
+  request and response behavior.
+- `internal/worker` tests use a fake `JobStore` to prove lease, start,
+  heartbeat, complete, and fail calls.
+- `internal/scheduler` tests use a fake `JobStore` to prove expired-lease
+  recovery requests.
+
+These tests should not import `internal/store/postgres`.
+
 ## Minimum Done Bar
 
 A reliability feature is not done until tests cover:

@@ -137,6 +137,9 @@ Early API responsibilities:
 
 The API server should call application services, not database tables directly.
 
+The first HTTP API exposes `POST /v1/jobs` and `GET /v1/jobs/{id}` as thin JSON
+adapters over the app service. It does not import PostgreSQL code.
+
 ### Application Services
 
 Application services coordinate use cases such as enqueueing a job, fetching job
@@ -144,6 +147,10 @@ status, canceling a job later, or retrying a dead-lettered job later.
 
 This layer protects the domain model from transport details and protects API
 handlers from storage details.
+
+The first app service exposes enqueue and lookup use cases. It applies a
+default retry policy when a caller does not provide one, generates job IDs, and
+delegates durable behavior to the `JobStore` contract.
 
 ### Domain Model
 
@@ -221,6 +228,10 @@ Worker responsibilities:
 
 Workers must assume they can crash at any point. The store and scheduler must be
 able to recover from that.
+
+The first worker runtime provides a deterministic `ProcessOne` operation. It
+leases one job, starts it, heartbeats while the handler runs, and reports either
+completion or failure through the store ownership protocol.
 
 ### Observability
 
@@ -475,4 +486,3 @@ ByteMQ v1 is successful when it can prove:
 
 If a feature does not make the reliable core easier to understand, easier to
 operate, or harder to break, it probably does not belong in v1.
-
