@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS job_events;
+DROP TABLE IF EXISTS job_attempts;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS schema_migrations;
