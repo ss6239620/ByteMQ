@@ -111,6 +111,26 @@ Avoid tests that depend on arbitrary sleeps. Prefer:
 
 If a test must wait, it should wait with a clear timeout and explain why.
 
+## Execution-Core Integration Tests
+
+The PostgreSQL execution-core tests cover the job ownership protocol:
+
+- Leasing only due queued jobs.
+- Returning `ErrNoJobAvailable` when no job can be leased.
+- Rejecting start, heartbeat, complete, and fail operations from the wrong worker
+  or lease.
+- Moving leased jobs to running and incrementing attempts on start.
+- Extending active leases through heartbeat.
+- Clearing lease fields on completion.
+- Scheduling retries when attempts remain.
+- Dead-lettering when attempts are exhausted.
+- Recovering expired leased jobs back to queued.
+- Recovering expired running jobs into retry or dead-letter states.
+
+These tests should run against a disposable PostgreSQL database through
+`BYTEMQ_TEST_DATABASE_URL`. The default suite still verifies that integration
+tests compile and skip clearly when the variable is absent.
+
 ## Minimum Done Bar
 
 A reliability feature is not done until tests cover:
@@ -119,4 +139,3 @@ A reliability feature is not done until tests cover:
 - The expected failure path.
 - The recovery path.
 - The invalid ownership or invalid state path when relevant.
-
